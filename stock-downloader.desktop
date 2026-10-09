@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Stock Price Downloader
+Comment=Download historical stock prices formatted as CSV
+Exec=python3 /home/ray/Code/stock-price-downloader/stock_downloader_gui.py
+Path=/home/ray/Code/stock-price-downloader
+Icon=accessories-calculator
+Categories=Office;Finance;Utility;
+Terminal=false
+StartupNotify=true

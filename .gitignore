@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# PyInstaller / Build artifacts
+build/
+dist/
+*.spec
+stock_downloader_gui
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE / Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data exports, charts, and test output
+*.csv
+*.png
+Oct-*-2026*

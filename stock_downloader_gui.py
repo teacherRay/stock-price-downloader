@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 from typing import Any, Dict, List, Optional, Tuple
+import webbrowser
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -48,6 +49,8 @@ try:
         fetch_company_fundamentals,
         evaluate_company_investment_worth,
         aggregate_to_weekly,
+        fetch_company_news,
+        generate_ai_research_prompts,
     )
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -57,6 +60,8 @@ except ImportError:
         fetch_company_fundamentals,
         evaluate_company_investment_worth,
         aggregate_to_weekly,
+        fetch_company_news,
+        generate_ai_research_prompts,
     )
 
 
@@ -77,6 +82,12 @@ class StockDownloaderApp(Gtk.Window):
         self.weekly_history_records: List[Dict] = []
         self.weekly_analysis: Optional[Dict[str, Any]] = None
         self.download_in_progress = False
+
+        # News state
+        self.current_news: List[Dict[str, Any]] = []
+        self.news_filter_text: str = ""
+        self.selected_news_item: Optional[Dict[str, Any]] = None
+        self.current_prompts: Dict[str, str] = {}
 
         # Chart state
         self.current_chart_interval: str = "daily"
@@ -385,11 +396,15 @@ class StockDownloaderApp(Gtk.Window):
         self.tab_analysis = self._create_analysis_tab()
         self.notebook.append_page(self.tab_analysis, Gtk.Label(label="📊 Technical Analysis"))
 
-        # Tab 4: AI Research Prompts
+        # Tab 4: Company News & Catalysts (NEW)
+        self.tab_news = self._create_news_tab()
+        self.notebook.append_page(self.tab_news, Gtk.Label(label="📰 Company News"))
+
+        # Tab 5: AI Research Prompts
         self.tab_prompts = self._create_prompts_tab()
         self.notebook.append_page(self.tab_prompts, Gtk.Label(label="🤖 AI Research Prompts"))
 
-        # Tab 5: Historical Data Table
+        # Tab 6: Historical Data Table
         self.tab_data = self._create_data_tab()
         self.notebook.append_page(self.tab_data, Gtk.Label(label="📋 Historical Data Table"))
 
@@ -1128,7 +1143,390 @@ class StockDownloaderApp(Gtk.Window):
         return vbox
 
     # -------------------------------------------------------------
-    # Tab 4: AI Research Prompts
+    # Tab 4: Company News & Market Catalysts
+    # -------------------------------------------------------------
+    def _create_news_tab(self) -> Gtk.Widget:
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        vbox.set_border_width(10)
+
+        # 1. Top Controls Bar
+        ctrl_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        vbox.pack_start(ctrl_box, False, False, 0)
+
+        # Search / filter entry
+        self.news_search_entry = Gtk.SearchEntry()
+        self.news_search_entry.set_placeholder_text("🔍 Filter headlines, publisher, summary, or tickers...")
+        self.news_search_entry.set_width_chars(35)
+        self.news_search_entry.connect("search-changed", self.on_news_filter_changed)
+        ctrl_box.pack_start(self.news_search_entry, True, True, 0)
+
+        # Story count label
+        self.lbl_news_count = Gtk.Label()
+        self.lbl_news_count.set_markup("<span color='#555555'>No news loaded</span>")
+        ctrl_box.pack_start(self.lbl_news_count, False, False, 0)
+
+        # Spinner
+        self.news_spinner = Gtk.Spinner()
+        ctrl_box.pack_start(self.news_spinner, False, False, 0)
+
+        # Refresh button
+        btn_refresh = Gtk.Button(label="🔄 Refresh News")
+        btn_refresh.set_tooltip_text("Fetch latest news stories for current ticker without re-downloading prices")
+        btn_refresh.connect("clicked", self.on_refresh_news_clicked)
+        ctrl_box.pack_start(btn_refresh, False, False, 0)
+
+        # Informational banner
+        self.lbl_news_status = Gtk.Label()
+        self.lbl_news_status.set_xalign(0)
+        self.lbl_news_status.set_line_wrap(True)
+        self.lbl_news_status.set_markup(
+            "<span size='small' color='#555555'>Provider: Yahoo Finance Search API &amp; RSS feed. Double-click row or click 'Open in Browser' to read the full story.</span>"
+        )
+        vbox.pack_start(self.lbl_news_status, False, False, 0)
+
+        # 2. Master-Detail Paned Layout
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        paned.set_position(560)
+        vbox.pack_start(paned, True, True, 0)
+
+        # Left: Story List
+        list_frame = Gtk.Frame(label=" Latest Company Stories ")
+        list_scroll = Gtk.ScrolledWindow()
+        list_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+
+        # ListStore: 0: time_ago, 1: publisher, 2: title, 3: tickers, 4: link, 5: summary, 6: pub_time_fmt, 7: uuid
+        self.news_store = Gtk.ListStore(str, str, str, str, str, str, str, str)
+        self.news_filter = self.news_store.filter_new()
+        self.news_filter.set_visible_func(self._news_filter_func)
+
+        self.news_tree = Gtk.TreeView(model=self.news_filter)
+        self.news_tree.set_grid_lines(Gtk.TreeViewGridLines.BOTH)
+
+        col_time = Gtk.TreeViewColumn("Time", Gtk.CellRendererText(), text=0)
+        col_time.set_min_width(70)
+        col_time.set_resizable(True)
+        self.news_tree.append_column(col_time)
+
+        col_pub = Gtk.TreeViewColumn("Publisher", Gtk.CellRendererText(), text=1)
+        col_pub.set_min_width(120)
+        col_pub.set_resizable(True)
+        self.news_tree.append_column(col_pub)
+
+        renderer_title = Gtk.CellRendererText()
+        renderer_title.set_property("ellipsize", 3)  # Pango.EllipsizeMode.END = 3
+        col_title = Gtk.TreeViewColumn("Headline", renderer_title, text=2)
+        col_title.set_min_width(280)
+        col_title.set_resizable(True)
+        self.news_tree.append_column(col_title)
+
+        col_tick = Gtk.TreeViewColumn("Tickers", Gtk.CellRendererText(), text=3)
+        col_tick.set_min_width(70)
+        col_tick.set_resizable(True)
+        self.news_tree.append_column(col_tick)
+
+        selection = self.news_tree.get_selection()
+        selection.connect("changed", self.on_news_selection_changed)
+        self.news_tree.connect("row-activated", self.on_news_row_activated)
+
+        list_scroll.add(self.news_tree)
+        list_frame.add(list_scroll)
+        paned.pack1(list_frame, True, False)
+
+        # Right: Article Inspector
+        detail_frame = Gtk.Frame(label=" Article Synopsis & Actions ")
+        detail_scroll = Gtk.ScrolledWindow()
+        detail_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+
+        detail_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        detail_box.set_border_width(12)
+
+        self.lbl_news_detail_title = Gtk.Label()
+        self.lbl_news_detail_title.set_line_wrap(True)
+        self.lbl_news_detail_title.set_xalign(0)
+        self.lbl_news_detail_title.set_selectable(True)
+        self.lbl_news_detail_title.set_markup(
+            "<span size='medium' weight='bold' color='#555555'>Select a story from the list to view its synopsis and metadata.</span>"
+        )
+        detail_box.pack_start(self.lbl_news_detail_title, False, False, 0)
+
+        self.lbl_news_detail_meta = Gtk.Label()
+        self.lbl_news_detail_meta.set_line_wrap(True)
+        self.lbl_news_detail_meta.set_xalign(0)
+        self.lbl_news_detail_meta.set_selectable(True)
+        detail_box.pack_start(self.lbl_news_detail_meta, False, False, 0)
+
+        # Action Buttons
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.btn_open_article = Gtk.Button(label="🌐 Open in Browser")
+        self.btn_open_article.set_sensitive(False)
+        self.btn_open_article.connect("clicked", self.on_open_news_article_clicked)
+        btn_box.pack_start(self.btn_open_article, False, False, 0)
+
+        self.btn_copy_link = Gtk.Button(label="🔗 Copy Link")
+        self.btn_copy_link.set_sensitive(False)
+        self.btn_copy_link.connect("clicked", self.on_copy_news_link_clicked)
+        btn_box.pack_start(self.btn_copy_link, False, False, 0)
+
+        self.btn_copy_story = Gtk.Button(label="📋 Copy Synopsis")
+        self.btn_copy_story.set_sensitive(False)
+        self.btn_copy_story.connect("clicked", self.on_copy_news_story_clicked)
+        btn_box.pack_start(self.btn_copy_story, False, False, 0)
+        detail_box.pack_start(btn_box, False, False, 0)
+
+        detail_box.pack_start(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), False, False, 2)
+
+        lbl_syn_head = Gtk.Label()
+        lbl_syn_head.set_xalign(0)
+        lbl_syn_head.set_markup("<b>Article Synopsis / Lead:</b>")
+        detail_box.pack_start(lbl_syn_head, False, False, 0)
+
+        text_scroll = Gtk.ScrolledWindow()
+        text_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        text_scroll.set_min_content_height(180)
+        self.news_text_view = Gtk.TextView()
+        self.news_text_view.set_editable(False)
+        self.news_text_view.set_wrap_mode(Gtk.WrapMode.WORD)
+        self.news_text_view.set_left_margin(8)
+        self.news_text_view.set_right_margin(8)
+        self.news_text_view.get_buffer().set_text("No article selected.")
+        text_scroll.add(self.news_text_view)
+        detail_box.pack_start(text_scroll, True, True, 0)
+
+        self.lbl_news_detail_url = Gtk.Label()
+        self.lbl_news_detail_url.set_line_wrap(True)
+        self.lbl_news_detail_url.set_xalign(0)
+        self.lbl_news_detail_url.set_selectable(True)
+        detail_box.pack_start(self.lbl_news_detail_url, False, False, 0)
+
+        detail_scroll.add(detail_box)
+        detail_frame.add(detail_scroll)
+        paned.pack2(detail_frame, True, False)
+
+        return vbox
+
+    def _news_filter_func(self, model, tree_iter, data) -> bool:
+        query = self.news_filter_text.strip().lower()
+        if not query:
+            return True
+        time_ago = (model.get_value(tree_iter, 0) or "").lower()
+        publisher = (model.get_value(tree_iter, 1) or "").lower()
+        title = (model.get_value(tree_iter, 2) or "").lower()
+        tickers = (model.get_value(tree_iter, 3) or "").lower()
+        summary = (model.get_value(tree_iter, 5) or "").lower()
+        return (
+            query in title
+            or query in publisher
+            or query in tickers
+            or query in summary
+            or query in time_ago
+        )
+
+    def on_news_filter_changed(self, entry):
+        self.news_filter_text = self.news_search_entry.get_text()
+        self.news_filter.refilter()
+        self._update_news_count_label()
+
+    def _update_news_count_label(self):
+        total = len(self.news_store)
+        filtered = len(self.news_filter)
+        if total == 0:
+            self.lbl_news_count.set_markup("<span color='#555555'>No news loaded</span>")
+        elif filtered == total:
+            self.lbl_news_count.set_markup(f"<span color='#0e8a16'><b>{total}</b> stories</span>")
+        else:
+            self.lbl_news_count.set_markup(
+                f"<span color='#0066cc'>Showing <b>{filtered}</b> of {total} stories</span>"
+            )
+
+    def _clear_news_detail(self):
+        self.lbl_news_detail_title.set_markup(
+            "<span size='medium' weight='bold' color='#555555'>Select a story from the list to view its synopsis and metadata.</span>"
+        )
+        self.lbl_news_detail_meta.set_text("")
+        self.lbl_news_detail_url.set_text("")
+        self.news_text_view.get_buffer().set_text("No article selected.")
+        self.btn_open_article.set_sensitive(False)
+        self.btn_copy_link.set_sensitive(False)
+        self.btn_copy_story.set_sensitive(False)
+        self.selected_news_item = None
+
+    def on_news_selection_changed(self, selection):
+        model, tree_iter = selection.get_selected()
+        if not tree_iter:
+            self._clear_news_detail()
+            return
+        time_ago = model.get_value(tree_iter, 0)
+        publisher = model.get_value(tree_iter, 1)
+        title = model.get_value(tree_iter, 2)
+        tickers = model.get_value(tree_iter, 3)
+        link = model.get_value(tree_iter, 4)
+        summary = model.get_value(tree_iter, 5)
+        pub_fmt = model.get_value(tree_iter, 6)
+
+        self.lbl_news_detail_title.set_markup(
+            f"<span size='large' weight='bold'>{GLib.markup_escape_text(title)}</span>"
+        )
+        meta_parts = []
+        if publisher:
+            meta_parts.append(f"<b>{GLib.markup_escape_text(publisher)}</b>")
+        if pub_fmt and pub_fmt != "N/A":
+            meta_parts.append(f"Published: {GLib.markup_escape_text(pub_fmt)}")
+        if time_ago and time_ago != "N/A":
+            meta_parts.append(f"({GLib.markup_escape_text(time_ago)})")
+        if tickers:
+            meta_parts.append(f"Tickers: <b>{GLib.markup_escape_text(tickers)}</b>")
+        self.lbl_news_detail_meta.set_markup(" • ".join(meta_parts))
+
+        buf = self.news_text_view.get_buffer()
+        if summary:
+            buf.set_text(summary)
+        else:
+            buf.set_text(
+                "No article synopsis provided in the feed. Click 'Open in Browser' to view the full story."
+            )
+
+        if link:
+            self.lbl_news_detail_url.set_markup(
+                f"<span size='small' color='#0066cc'>Link: <a href='{GLib.markup_escape_text(link)}'>{GLib.markup_escape_text(link)}</a></span>"
+            )
+            self.btn_open_article.set_sensitive(True)
+            self.btn_copy_link.set_sensitive(True)
+        else:
+            self.lbl_news_detail_url.set_text("")
+            self.btn_open_article.set_sensitive(False)
+            self.btn_copy_link.set_sensitive(False)
+
+        self.btn_copy_story.set_sensitive(True)
+        self.selected_news_item = {
+            "title": title,
+            "publisher": publisher,
+            "link": link,
+            "summary": summary,
+            "pub_fmt": pub_fmt,
+            "time_ago": time_ago,
+            "tickers": tickers,
+        }
+
+    def on_news_row_activated(self, treeview, path, column):
+        model = treeview.get_model()
+        tree_iter = model.get_iter(path)
+        link = model.get_value(tree_iter, 4)
+        if link:
+            try:
+                webbrowser.open(link)
+            except Exception as e:
+                self.show_error(f"Could not open browser: {e}")
+
+    def on_open_news_article_clicked(self, widget):
+        if self.selected_news_item and self.selected_news_item.get("link"):
+            try:
+                webbrowser.open(self.selected_news_item["link"])
+            except Exception as e:
+                self.show_error(f"Could not open browser: {e}")
+
+    def on_copy_news_link_clicked(self, widget):
+        if self.selected_news_item and self.selected_news_item.get("link"):
+            cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+            cb.set_text(self.selected_news_item["link"], -1)
+            self.status_label.set_markup("<span color='#0e8a16'>🔗 News link copied to clipboard!</span>")
+
+    def on_copy_news_story_clicked(self, widget):
+        if self.selected_news_item:
+            item = self.selected_news_item
+            text = (
+                f"Headline: {item.get('title')}\n"
+                f"Publisher: {item.get('publisher')} ({item.get('pub_fmt')})\n"
+                f"Tickers: {item.get('tickers')}\n"
+                f"URL: {item.get('link')}\n\n"
+                f"Synopsis:\n{item.get('summary')}\n"
+            )
+            cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+            cb.set_text(text, -1)
+            self.status_label.set_markup("<span color='#0e8a16'>📋 News headline and synopsis copied!</span>")
+
+    def _update_news_ui(self, news_items: List[Dict[str, Any]], error_msg: Optional[str] = None):
+        self.news_store.clear()
+        self.current_news = news_items or []
+        self._clear_news_detail()
+        ticker = self.current_ticker or "TICKER"
+        if error_msg:
+            self.lbl_news_status.set_markup(
+                f"<span color='#b08800'>⚠️ News feed notice for <b>{GLib.markup_escape_text(ticker)}</b>: {GLib.markup_escape_text(error_msg)}</span>"
+            )
+        else:
+            self.lbl_news_status.set_markup(
+                f"<span size='small' color='#555555'>Showing latest stories for <b>{GLib.markup_escape_text(ticker)}</b> from Yahoo Finance. Double-click row or click 'Open in Browser' to read.</span>"
+            )
+
+        for item in self.current_news:
+            tickers_str = ", ".join(item.get("related_tickers", []))
+            self.news_store.append([
+                item.get("time_ago", "N/A"),
+                item.get("publisher", "Unknown"),
+                item.get("title", ""),
+                tickers_str,
+                item.get("link", ""),
+                item.get("summary", ""),
+                item.get("publish_time_fmt", "N/A"),
+                str(item.get("uuid", "")),
+            ])
+
+        self._update_news_count_label()
+        if len(self.news_filter) > 0:
+            first_path = Gtk.TreePath.new_first()
+            self.news_tree.get_selection().select_path(first_path)
+
+    def on_refresh_news_clicked(self, widget):
+        ticker = self.current_ticker or self.entry_ticker.get_text().strip().upper()
+        if not ticker:
+            self.status_label.set_markup("<span color='#d73a49'>⚠️ Please enter a ticker symbol first.</span>")
+            return
+        self.news_spinner.start()
+        self.lbl_news_count.set_markup("<span color='#555555'>Refreshing news...</span>")
+        token = self.active_request_token
+        threading.Thread(
+            target=self._worker_refresh_news_only,
+            args=(token, ticker),
+            daemon=True,
+        ).start()
+
+    def _worker_refresh_news_only(self, token: int, ticker: str):
+        news_items = []
+        news_error = None
+        try:
+            news_items = fetch_company_news(ticker, 25)
+        except Exception as e:
+            news_error = str(e)
+
+        GLib.idle_add(self._on_news_refresh_complete, token, ticker, news_items, news_error)
+
+    def _on_news_refresh_complete(
+        self,
+        token: int,
+        ticker: str,
+        news_items: List[Dict[str, Any]],
+        news_error: Optional[str],
+    ) -> bool:
+        if token != self.active_request_token:
+            return False
+        self.news_spinner.stop()
+        if news_error:
+            self.status_label.set_markup(
+                f"<span color='#b08800'>⚠️ News refresh notice for <b>{GLib.markup_escape_text(ticker)}</b>: {GLib.markup_escape_text(news_error)}</span>"
+            )
+        else:
+            self.status_label.set_markup(
+                f"<span color='#0e8a16'>✔ Refreshed {len(news_items)} news stories for <b>{GLib.markup_escape_text(ticker)}</b></span>"
+            )
+        self._update_news_ui(news_items, news_error)
+        self.current_prompts = generate_ai_research_prompts(
+            ticker, self.current_fundamentals, self.current_analysis, self.current_news
+        )
+        self.on_prompt_selection_changed(None)
+        return False
+
+    # -------------------------------------------------------------
+    # Tab 5: AI Research Prompts
     # -------------------------------------------------------------
     def _create_prompts_tab(self) -> Gtk.Widget:
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -1150,10 +1548,11 @@ class StockDownloaderApp(Gtk.Window):
 
         self.combo_prompts = Gtk.ComboBoxText()
         templates = [
+            ("synthesis", "Multi-Pillar Executive Investment Synthesis"),
             ("quality", "Pillar A: Company Financial Quality & Moats"),
             ("valuation", "Pillar B: Valuation Multiples & Growth Expectations"),
             ("technicals", "Pillar C: Technical Setup & Swing Points"),
-            ("synthesis", "Multi-Pillar Executive Investment Synthesis"),
+            ("news", "Pillar D: Recent News & Market Catalysts"),
             ("Moving Averages (Chapter 3)", "Book Ch 3: Moving Averages & Crossovers"),
             ("RSI & Momentum (Chapter 4)", "Book Ch 4: RSI Momentum & Divergences"),
             ("Bollinger Bands (Chapter 5)", "Book Ch 5: Bollinger Bands & Volatility"),
@@ -1306,6 +1705,14 @@ class StockDownloaderApp(Gtk.Window):
         except Exception as e:
             fund_error = str(e)
 
+        # 3. Fetch company news & catalysts
+        news_items = []
+        news_error = None
+        try:
+            news_items = fetch_company_news(ticker, 25)
+        except Exception as e:
+            news_error = str(e)
+
         GLib.idle_add(
             self._on_download_complete,
             token,
@@ -1318,6 +1725,8 @@ class StockDownloaderApp(Gtk.Window):
             price_error,
             fund_error,
             include_indicators,
+            news_items,
+            news_error,
         )
 
     def _on_download_complete(
@@ -1331,10 +1740,14 @@ class StockDownloaderApp(Gtk.Window):
         fund: Optional[Dict[str, Any]],
         price_error: Optional[str],
         fund_error: Optional[str],
-        include_indicators: bool,
+        include_indicators: bool = True,
+        news_items: Optional[List[Dict[str, Any]]] = None,
+        news_error: Optional[str] = None,
     ):
         if token != self.active_request_token:
             return False
+
+        news_items = news_items or []
 
         self.download_in_progress = False
         self.spinner.stop()
@@ -1351,6 +1764,7 @@ class StockDownloaderApp(Gtk.Window):
             )
             if fund and "error" not in fund:
                 self._update_fundamentals_ui(fund)
+            self._update_news_ui(news_items, news_error)
             self._render_empty_chart(f"Chart unavailable: {price_error}")
             return False
 
@@ -1382,8 +1796,16 @@ class StockDownloaderApp(Gtk.Window):
         if analysis:
             self._update_technicals_ui(analysis)
 
+        # Update Company News Tab
+        self._update_news_ui(news_items, news_error)
+
         # Render Interactive Charts Tab
         self._render_chart()
+
+        # Generate enriched AI research prompts
+        self.current_prompts = generate_ai_research_prompts(
+            ticker, fund, analysis, self.current_news
+        )
 
         self._populate_table(rows, include_indicators)
         self.on_prompt_selection_changed(None)
@@ -1398,6 +1820,9 @@ class StockDownloaderApp(Gtk.Window):
         self.lbl_pillar_b_multiples.set_markup("<span color='#d73a49'>Multiples: N/A</span>")
         self.lbl_pillar_c_stance.set_markup("<span color='#d73a49'>Stance: N/A</span>")
         self._render_empty_chart(f"Chart unavailable: {err_msg}")
+        self._update_news_ui([], f"Request failed: {err_msg}")
+        self.current_prompts = {}
+        self.on_prompt_selection_changed(None)
 
     def _set_fundamentals_unavailable(self, ticker: str, error_msg: str):
         self.current_fundamentals = None
@@ -1642,15 +2067,17 @@ class StockDownloaderApp(Gtk.Window):
         fund = self.current_fundamentals or {}
         analysis = self.current_analysis or {}
 
-        fund_prompts = fund.get("ai_prompts", {})
-        analysis_prompts = analysis.get("ai_prompts", {})
-
-        if selected_id in fund_prompts:
-            prompt_content = fund_prompts[selected_id]
-        elif selected_id in analysis_prompts:
-            prompt_content = analysis_prompts[selected_id]
+        if self.current_prompts and selected_id in self.current_prompts:
+            prompt_content = self.current_prompts[selected_id]
         else:
-            prompt_content = "Download and analyze data for a ticker to generate this prompt."
+            fund_prompts = fund.get("ai_prompts", {})
+            analysis_prompts = analysis.get("ai_prompts", {})
+            if selected_id in fund_prompts:
+                prompt_content = fund_prompts[selected_id]
+            elif selected_id in analysis_prompts:
+                prompt_content = analysis_prompts[selected_id]
+            else:
+                prompt_content = "Download and analyze data for a ticker to generate this prompt."
 
         buf.set_text(prompt_content)
 

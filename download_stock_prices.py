@@ -21,12 +21,12 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from stock_analysis import analyze_stock_data, fetch_company_fundamentals
+    from stock_analysis import analyze_stock_data, fetch_company_fundamentals, fetch_company_news
 except ImportError:
     import sys
     import os
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from stock_analysis import analyze_stock_data, fetch_company_fundamentals
+    from stock_analysis import analyze_stock_data, fetch_company_fundamentals, fetch_company_news
 
 
 def get_extraction_date_str(dt: Optional[datetime.datetime] = None) -> str:
@@ -470,6 +470,27 @@ def main():
             print("=" * 70)
         except Exception as e:
             print(f"Technical Analysis error: {e}")
+
+        # 4. Latest Company News & Catalysts
+        print("\n" + "=" * 70)
+        print("  LATEST COMPANY NEWS & MARKET CATALYSTS")
+        print("=" * 70)
+        try:
+            news_items = fetch_company_news(clean_sym, max_items=5)
+            if news_items:
+                for idx, item in enumerate(news_items, 1):
+                    t_ago = item.get("time_ago", "N/A")
+                    pub = item.get("publisher", "Unknown")
+                    print(f"\n{idx}. [{t_ago} | {pub}] {item.get('title')}")
+                    if item.get("summary"):
+                        print(f"   Summary : {item.get('summary')}")
+                    if item.get("link"):
+                        print(f"   URL     : {item.get('link')}")
+                print("=" * 70)
+            else:
+                print(f"No recent news stories found for '{clean_sym}'.")
+        except Exception as e:
+            print(f"Company News error: {e}")
 
 
 if __name__ == "__main__":

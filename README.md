@@ -40,14 +40,25 @@ A dedicated interactive chart tab embedded natively into GTK 3, sharing the exac
 - Produces mathematically identical indicator values for identical dates regardless of ascending or descending sort order.
 - Generates structured CSVs named `<Mon>-<Day>-<Year>_<Ticker>_<TradingDays>.csv` (e.g. `Oct-8-2026_NVDA_38.csv`).
 
-### 6. Traceable AI / ChatGPT Research Prompts
+### 6. Company News & Market Catalysts
+A dedicated news research tab embedded into the desktop application and CLI tool:
+- **Dual Data Sourcing**: Integrates Yahoo Finance Search API with Yahoo Finance RSS feeds to retrieve fresh company stories with article synopses, publishers, publication dates, relative time-ago badges (`15m ago`, `2h ago`), and related ticker symbols.
+- **Master-Detail Story Inspector**: Left pane lists news items with title ellipsizing and timestamps; right pane displays the full headline, publisher badges, article synopsis, direct article URL, and quick-action buttons.
+- **Interactive Actions**: Double-click any story row or click **🌐 Open in Browser** to launch the story in your system's default web browser; one-click buttons copy the link or full headline + synopsis to clipboard.
+- **Instant Client-Side Filtering**: Built-in search bar filters stories in real time by keywords across headline, publisher, related symbols, or article synopsis.
+- **On-Demand Refresh**: Independent **🔄 Refresh News** button retrieves the latest headlines for the active ticker asynchronously without requiring a re-download of price bars.
+- **Decoupled Error Resilience**: News network failures never block candlestick charts or financial metrics; informative banners with retry controls keep market research fully functional.
+
+### 7. Traceable AI / ChatGPT Research Prompts
 - Encloses verified snapshot data within strict delimiter boundaries:
   ```text
   === VERIFIED DATA START ===
   ...
   === VERIFIED DATA END ===
   ```
-- Guardrails instruct the AI to separate observed facts from interpretations, evaluate quality and valuation independently, avoid hallucinating unverified figures, and frame recommendations around a defined investment horizon.
+- Embeds top recent company news stories and market catalysts directly into the verified data block.
+- Features dedicated prompt templates including **Multi-Pillar Executive Investment Synthesis**, **Pillar D: Recent News & Market Catalysts**, and book indicator deep-dives.
+- Guardrails instruct the AI to separate observed facts from interpretations, categorize news into operational catalysts vs. market noise, avoid hallucinating unverified figures, and frame recommendations around a defined investment horizon.
 
 ---
 
@@ -82,16 +93,17 @@ python3 stock_downloader_gui.py
 2. Select the number of trading sessions (e.g., `38`, `60`, `252`).
 3. Click **📥 Download & Analyze**.
 4. Browse the tabs:
-   - **🏢 Company Quality & Valuation**: Rubric audit, coverage %, valuation multiples, narrative findings.
+    - **🏢 Company Quality & Valuation**: Rubric audit, coverage %, valuation multiples, narrative findings.
    - **📈 Multi-Period Trends**: Multi-year annual filing history and margin trajectory.
    - **📉 Interactive Charts**: Candlestick/line chart, moving averages, volume, RSI, MACD, Stochastic, crosshair, range zoom.
    - **📊 Technical Analysis**: Technical stance, signals list, and comprehensive synthesis report.
-   - **🤖 AI Research Prompts**: Copyable prompt templates for ChatGPT / Claude / Gemini.
+   - **📰 Company News**: Latest stories, publisher metadata, relative time-ago, search filter, synopsis, browser launch, and on-demand refresh.
+   - **🤖 AI Research Prompts**: Copyable prompt templates for ChatGPT / Claude / Gemini with news integration.
    - **📋 Historical Data Table**: Enriched tabular view of prices and indicators.
 
 ### 2. Command-Line Interface (CLI)
 ```bash
-# Basic download with technical indicators:
+# Basic download with technical indicators & company news:
 python3 download_stock_prices.py NVDA 38 --indicators
 
 # Ascending chronological sort order:
@@ -108,7 +120,7 @@ python3 download_stock_prices.py --help
 
 ## Running the Test Suite
 
-Run the 10 offline unit tests (deterministic data with no network dependencies):
+Run the 14 offline unit tests (deterministic data with mocked network responses):
 ```bash
 python3 -m unittest -v test_version4.py
 ```
@@ -125,6 +137,10 @@ The test suite validates:
 - Partial failure decoupling (price charts usable when fundamentals fail).
 - Weekly bar aggregation mathematics and weekly indicator calculation.
 - Matplotlib chart series arrays and GTK 3 interaction.
+- News HTML entity unescaping, tag stripping, and relative time-ago formatting.
+- Multi-source news fetching, RSS synopsis attachment, and fallback merging.
+- AI prompt news integration with verified data boundary enforcement.
+- GTK 3 Company News tab model population, keyword search filtering, and inspector binding.
 
 ---
 

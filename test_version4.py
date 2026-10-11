@@ -347,7 +347,205 @@ class TestVersion4(unittest.TestCase):
         app._on_range_clicked("1m")
         self.assertEqual(app.current_chart_range, "1m")
 
+    def test_news_html_cleaning_and_time_ago(self):
+        """Test HTML unescaping, tag stripping, and relative time-ago formatting."""
+        from stock_analysis import _clean_html_text, _format_time_ago
+
+        # HTML cleaning
+        raw_html = "&lt;b&gt;NVIDIA&amp;#39;s&lt;/b&gt; Q3 Revenue &amp;amp; AI Blackwell &quot;Surge&quot; &lt;a href='#'&gt;Read More&lt;/a&gt;"
+        cleaned = _clean_html_text(raw_html)
+        self.assertEqual(cleaned, "NVIDIA's Q3 Revenue & AI Blackwell \"Surge\" Read More")
+
+        # Empty/None string
+        self.assertEqual(_clean_html_text(""), "")
+        self.assertEqual(_clean_html_text(None), "")
+
+        # Time ago formatting
+        import time
+        now = int(time.time())
+        self.assertEqual(_format_time_ago(0), "N/A")
+        self.assertEqual(_format_time_ago(None), "N/A")
+        self.assertEqual(_format_time_ago(now - 30), "30s ago")
+        self.assertEqual(_format_time_ago(now - 120), "2m ago")
+        self.assertEqual(_format_time_ago(now - 7200), "2h ago")
+        self.assertEqual(_format_time_ago(now - 172800), "2d ago")
+        self.assertEqual(_format_time_ago(now - 14 * 86400), "2w ago")
+
+    def test_fetch_company_news_mocked(self):
+        """Test fetch_company_news with mocked Yahoo Finance API and RSS responses."""
+        from unittest.mock import MagicMock, patch
+        import io
+        import json
+        from stock_analysis import fetch_company_news
+
+        sample_json_response = json.dumps({
+            "news": [
+                {
+                    "uuid": "story-1",
+                    "title": "NVIDIA Unveils Next-Gen AI Superchip Architecture",
+                    "publisher": "Tech Wire",
+                    "link": "https://finance.yahoo.com/news/nvda-ai-chip-1.html",
+                    "providerPublishTime": 1791700000,
+                    "relatedTickers": ["NVDA", "AMD"],
+                },
+                {
+                    "uuid": "story-2",
+                    "title": "Semiconductor Sector Faces Broad Margin Scrutiny",
+                    "publisher": "Market Pulse",
+                    "link": "https://finance.yahoo.com/news/semi-margins-2.html",
+                    "providerPublishTime": 1791690000,
+                    "relatedTickers": ["NVDA", "INTC", "TSM"],
+                },
+            ]
+        }).encode("utf-8")
+
+        sample_rss_response = b"""<?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0">
+            <channel>
+                <title>Yahoo Finance RSS</title>
+                <item>
+                    <title>NVIDIA Unveils Next-Gen AI Superchip Architecture</title>
+                    <description>NVIDIA revealed its latest datacenter GPU platform today, emphasizing energy efficiency.</description>
+                    <link>https://finance.yahoo.com/news/nvda-ai-chip-1.html</link>
+                    <pubDate>Sun, 11 Oct 2026 06:26:40 +0000</pubDate>
+                </item>
+                <item>
+                    <title>Third Standalone Story in RSS Feed</title>
+                    <description>Autonomous robotics demand accelerates chip orders across key suppliers.</description>
+                    <link>https://finance.yahoo.com/news/robotics-demand-3.html</link>
+                    <pubDate>Sun, 11 Oct 2026 04:00:00 +0000</pubDate>
+                </item>
+            </channel>
+        </rss>"""
+
+        def mock_urlopen(req, timeout=8):
+            url = req.full_url if hasattr(req, "full_url") else str(req)
+            mock_resp = MagicMock()
+            if "search" in url:
+                mock_resp.read.return_value = sample_json_response
+            elif "rss" in url or "headline" in url:
+                mock_resp.read.return_value = sample_rss_response
+            else:
+                mock_resp.read.return_value = b"{}"
+            mock_resp.__enter__.return_value = mock_resp
+            return mock_resp
+
+        with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+            news = fetch_company_news("NVDA", max_items=10)
+            self.assertTrue(len(news) >= 2)
+
+            # Story 1 had match in RSS, so summary should be attached
+            story1 = next(item for item in news if "Next-Gen AI Superchip" in item["title"])
+            self.assertEqual(story1["publisher"], "Tech Wire")
+            self.assertEqual(story1["related_tickers"], ["NVDA", "AMD"])
+            self.assertIn("energy efficiency", story1["summary"])
+            self.assertEqual(story1["link"], "https://finance.yahoo.com/news/nvda-ai-chip-1.html")
+
+            # Standalone story 3 should be merged from RSS fallback
+            story3 = next(item for item in news if "Third Standalone Story" in item["title"])
+            self.assertIn("robotics", story3["summary"])
+            self.assertEqual(story3["publisher"], "Yahoo Finance RSS")
+
+    def test_ai_research_prompts_news_integration(self):
+        """Verify AI prompts embed recent news items into the verified data block and include the news prompt."""
+        from stock_analysis import generate_ai_research_prompts
+
+        news_items = [
+            {
+                "title": "NVIDIA Expands Cloud Enterprise Partnerships",
+                "publisher": "Reuters",
+                "link": "https://reuters.com/article/nvda-cloud",
+                "time_ago": "2h ago",
+                "summary": "Strategic agreements sign multiple tier-1 hyperscalers.",
+                "related_tickers": ["NVDA"],
+            }
+        ]
+
+        prompts = generate_ai_research_prompts("NVDA", {}, {}, news_items=news_items)
+        self.assertIn("news", prompts)
+        self.assertIn("synthesis", prompts)
+        self.assertIn("quality", prompts)
+
+        # News item must be present inside verified data block
+        news_prompt = prompts["news"]
+        self.assertIn("=== VERIFIED DATA START ===", news_prompt)
+        self.assertIn("=== VERIFIED DATA END ===", news_prompt)
+        self.assertIn("NVIDIA Expands Cloud Enterprise Partnerships", news_prompt)
+        self.assertIn("Reuters", news_prompt)
+        self.assertIn("Strategic agreements sign multiple tier-1 hyperscalers", news_prompt)
+
+        # Instructions must demand categorization and financial impact analysis
+        self.assertIn("Operational / Earnings Catalysts", news_prompt)
+        self.assertIn("Macro / Regulatory Headwinds", news_prompt)
+
+    def test_gui_news_tab_and_filtering(self):
+        """Verify GUI Company News tab population, master-detail selection, and keyword filtering."""
+        from stock_downloader_gui import StockDownloaderApp
+
+        app = StockDownloaderApp()
+        app.current_ticker = "TEST_SYM"
+
+        sample_news = [
+            {
+                "title": "Company Launches Revolutionary Next-Gen Product",
+                "publisher": "Tech Times",
+                "link": "https://techtimes.example.com/item1",
+                "publish_time": 1791700000,
+                "publish_time_fmt": "2026-10-11 12:00:00 UTC",
+                "time_ago": "30m ago",
+                "summary": "The new product doubles throughput with half the power consumption.",
+                "related_tickers": ["TEST_SYM", "PEER_SYM"],
+                "uuid": "item1",
+            },
+            {
+                "title": "Quarterly Financial Results Schedule Announced",
+                "publisher": "Business Wire",
+                "link": "https://businesswire.example.com/item2",
+                "publish_time": 1791690000,
+                "publish_time_fmt": "2026-10-11 09:00:00 UTC",
+                "time_ago": "3h ago",
+                "summary": "Management will host a conference call on November 15.",
+                "related_tickers": ["TEST_SYM"],
+                "uuid": "item2",
+            },
+        ]
+
+        # Update UI with news
+        app._update_news_ui(sample_news)
+        self.assertEqual(len(app.news_store), 2)
+        self.assertIn("2", app.lbl_news_count.get_text())
+
+        # Test filter matching title
+        app.news_search_entry.set_text("Revolutionary")
+        app.on_news_filter_changed(None)
+        self.assertEqual(len(app.news_filter), 1)
+
+        # Test filter matching publisher
+        app.news_search_entry.set_text("Business Wire")
+        app.on_news_filter_changed(None)
+        self.assertEqual(len(app.news_filter), 1)
+
+        # Test filter matching non-existent word
+        app.news_search_entry.set_text("NonExistentTermXYZ")
+        app.on_news_filter_changed(None)
+        self.assertEqual(len(app.news_filter), 0)
+
+        # Reset filter
+        app.news_search_entry.set_text("")
+        app.on_news_filter_changed(None)
+        self.assertEqual(len(app.news_filter), 2)
+
+        # Selection updates detail pane
+        first_iter = app.news_filter.get_iter_first()
+        self.assertIsNotNone(first_iter)
+        app.news_tree.get_selection().select_iter(first_iter)
+        self.assertEqual(app.selected_news_item["title"], sample_news[0]["title"])
+        self.assertTrue(app.btn_open_article.get_sensitive())
+        self.assertTrue(app.btn_copy_link.get_sensitive())
+        self.assertTrue(app.btn_copy_story.get_sensitive())
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
